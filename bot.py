@@ -105,7 +105,8 @@ class Form(StatesGroup): add = State()
 
 @router.message(Command("start"))
 async def cmd_start(m: Message, bot: Bot):
-    await m.delete()
+    try: await m.delete()
+    except: pass
     await ui_panel(bot, m.chat.id, m.from_user.id, "🤖 **TikTok IMAP Panel**", 
                   InlineKeyboardMarkup(inline_keyboard=[
                       [InlineKeyboardButton(text="➕ Добавить пачку", callback_data="add")],
@@ -141,7 +142,8 @@ async def process_add(m: Message, state: FSMContext, bot: Bot):
                          (m.from_user.id, p[0].strip(), p[1].strip(), p[2].strip(), p[3].strip(), host, 993))
     conn.commit()
     conn.close()
-    await m.delete()
+    try: await m.delete()
+    except: pass
     await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📂 К списку", callback_data="p:0")], [InlineKeyboardButton(text="🏠 Меню", callback_data="main")]])
     await ui_panel(bot, m.chat.id, m.from_user.id, "✅ Аккаунты добавлены!", kb)
@@ -209,4 +211,7 @@ async def main():
     bot_obj = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    await dp.start_polling(bot_
+    await dp.start_polling(bot_obj)
+
+if __name__ == "__main__":
+    asyncio.run(main())
