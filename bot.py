@@ -19,11 +19,12 @@ from aiogram.client.default import DefaultBotProperties
 
 logging.basicConfig(level=logging.INFO)
 
+# Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "/app/data/bot_database.db"
 os.makedirs("/app/data", exist_ok=True)
 
-# Храним ID сообщения панели
+# Хранилище ID последнего сообщения панели
 last_msg: Dict[int, int] = {}
 
 def init_db():
@@ -31,7 +32,8 @@ def init_db():
     conn.execute('''CREATE TABLE IF NOT EXISTS accounts (
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT, 
         passmail TEXT, username TEXT, tiktok_password TEXT, imap_host TEXT, imap_port INTEGER)''')
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 init_db()
 
@@ -54,31 +56,36 @@ async def fetch_code(email_addr, password, host):
                     for part in msg.walk():
                         if part.get_content_type() == "text/plain":
                             body += part.get_payload(decode=True).decode(errors='ignore')
-                else: body = msg.get_payload(decode=True).decode(errors='ignore')
+                else:
+                    body = msg.get_payload(decode=True).decode(errors='ignore')
                 code = re.search(r"\b(\d{6})\b", body)
                 if code: return code.group(1)
             mail.logout()
         except: return None
+        return None
     
     res = await asyncio.to_thread(_sync, host)
-    if not res: res = await asyncio.to_thread(_sync, "imap.firstmail.ltd")
+    if not res: 
+        res = await asyncio.to_thread(_sync, "imap.firstmail.ltd")
     return res
 
 router = Router()
 
 async def ui_panel(bot: Bot, chat_id: int, user_id: int, text: str, kb: InlineKeyboardMarkup):
-    """Главная функция обновления интерфейса"""
     if user_id in last_msg:
         try:
             await bot.edit_message_text(text, chat_id, last_msg[user_id], reply_markup=kb)
             return
-        except Exception: pass
+        except Exception:
+            pass
     sent = await bot.send_message(chat_id, text, reply_markup=kb)
     last_msg[user_id] = sent.message_id
 
 def get_kb_list(user_id, page):
-    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row
-    accs = conn.execute('SELECT * FROM accounts WHERE user_id = ?', (user_id,)).fetchall(); conn.close()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    accs = conn.execute('SELECT * FROM accounts WHERE user_id = ?', (user_id,)).fetchall()
+    conn.close()
     per_page = 10
     start = page * per_page
     btns = []
@@ -116,4 +123,90 @@ async def back_main(cb: CallbackQuery, bot: Bot, state: FSMContext):
 
 @router.callback_query(F.data == "add")
 async def add_start(cb: CallbackQuery, state: FSMContext, bot: Bot):
-    await ui_panel(bot, cb.message.chat.id, cb.from_user.id, "📥 **Режим добавления**\n\nПришли данные: `почта|пароль
+    text = "📥 **Режим добавления**\n\nПришли данные: `почта|пароль_почты|юзер|пароль_тт`"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="main")]])
+    await ui_panel(bot, cb.message.chat.id, cb.from_user.id, text, kb)
+    await state.set_state(Form.add)
+
+@router.message(Form.add)
+async def process_add(m: Message, state: FSMContext, bot: Bot):
+    lines = m.text.splitlines()
+    conn = sqlite3.connect(DB_PATH)
+    for line in lines:
+        p = line.split("|")
+        if len(p) >= 4:
+            domain = p[0].split("@")[-1].lower()
+            host = "imap.firstmail.ltd" if domain in FIRSTMAIL_DOMAINS else f"imap.{domain}"
+            conn.execute('INSERT INTO accounts (user_id, email, passmail, username, tiktok_password, imap_host, imap_port) VALUES (?,?,?,?,?,?,?)',
+                         (m.from_user.id, p[0].strip(), p[1].strip(), p[2].strip(), p[3].strip(), host, 993))
+    conn.commit()
+    conn.close()
+    await m.delete()
+    await state.clear()
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📂 К списку", callback_data="p:0")], [InlineKeyboardButton(text="🏠 Меню", callback_data="main")]])
+    await ui_panel(bot, m.chat.id, m.from_user.id, "✅ Аккаунты добавлены!", kb)
+
+@router.callback_query(F.data.startswith("p:"))
+async def show_list(cb: CallbackQuery, bot: Bot):
+    page = int(cb.data.split(":")[1])
+    await ui_panel(bot, cb.message.chat.id, cb.from_user.id, f"📂 **Список (Стр. {page+1})**", get_kb_list(cb.from_user.id, page))
+
+@router.callback_query(F.data == "confirm_wipe")
+async def confirm_wipe(cb: CallbackQuery, bot: Bot):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ ДА, УДАЛИТЬ ВСЁ", callback_data="wipe_force")],
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="p:0")]
+    ])
+    await ui_panel(bot, cb.message.chat.id, cb.from_user.id, "⚠️ **ВЫ УВЕРЕНЫ?**\nВсе аккаунты будут стерты!", kb)
+
+@router.callback_query(F.data == "wipe_force")
+async def wipe_force(cb: CallbackQuery, bot: Bot, state: FSMContext):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('DELETE FROM accounts WHERE user_id = ?', (cb.from_user.id,))
+    conn.commit()
+    conn.close()
+    await cb.answer("База очищена", show_alert=True)
+    await back_main(cb, bot, state)
+
+@router.callback_query(F.data.startswith("v:"))
+async def view_acc(cb: CallbackQuery, bot: Bot):
+    _, aid, page = cb.data.split(":")
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    a = conn.execute('SELECT * FROM accounts WHERE id = ?', (aid,)).fetchone()
+    conn.close()
+    text = f"👤 **{a['username']}**\n📧 `{a['email']}`\n🔑 Pass: `{a['tiktok_password']}`"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📩 Получить код", callback_data=f"get:{aid}:{page}")],
+        [InlineKeyboardButton(text="🗑 Удалить этот", callback_data=f"del:{aid}:{page}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"p:{page}")]
+    ])
+    await ui_panel(bot, cb.message.chat.id, cb.from_user.id, text, kb)
+
+@router.callback_query(F.data.startswith("get:"))
+async def get_mail(cb: CallbackQuery, bot: Bot):
+    _, aid, page = cb.data.split(":")
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    a = conn.execute('SELECT * FROM accounts WHERE id = ?', (aid,)).fetchone()
+    conn.close()
+    await cb.answer("⏳ Ищу код...")
+    code = await fetch_code(a['email'], a['passmail'], a['imap_host'])
+    text = f"👤 **{a['username']}**\n\n🔢 КОД: `{code if code else 'НЕ НАЙДЕН'}`"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"v:{aid}:{page}")]])
+    await ui_panel(bot, cb.message.chat.id, cb.from_user.id, text, kb)
+
+@router.callback_query(F.data.startswith("del:"))
+async def del_acc(cb: CallbackQuery, bot: Bot):
+    _, aid, page = cb.data.split(":")
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('DELETE FROM accounts WHERE id = ?', (aid,))
+    conn.commit()
+    conn.close()
+    await show_list(cb, bot)
+
+async def main():
+    bot_obj = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+    await dp.start_polling(bot_
